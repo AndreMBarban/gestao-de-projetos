@@ -488,6 +488,7 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
       incoming.authors = incoming.author ? [incoming.author] : [];
       incoming.obs = [];
       incoming.idxStr = incoming.idxStr || null;
+      incoming.idxParts = incoming.idxParts || null;
       bucket.map[dedupKey]=incoming;
       bucket.items.push(incoming);
       return;
@@ -497,6 +498,7 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
     existing._orig = Math.min(existing._orig, incoming._orig);
 
     if (!existing.idxStr && incoming.idxStr) existing.idxStr = incoming.idxStr;
+    if (!existing.idxParts && incoming.idxParts) existing.idxParts = incoming.idxParts.slice();
 
     existing.authors = existing.authors || [];
     if (incoming.author && existing.authors.every(a=>a.toLowerCase()!==incoming.author.toLowerCase())){
@@ -618,7 +620,7 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
           }
 
           var dedupKey = (it.idx && it.idx.length) ? ('IDX:'+it.idx.join('.')+'@L'+it.level) : (stackClean.slice(0, it.level+1).join(' > ') + ' @L' + it.level);
-          mergeIntoBucket_(agg[P][C], dedupKey, { text: stackClean[it.level], level: it.level, ord: ord, _orig: it._orig||0, idxStr: it.idx ? it.idx.join('.') : null, author: it.author });
+          mergeIntoBucket_(agg[P][C], dedupKey, { text: stackClean[it.level], level: it.level, ord: ord, _orig: it._orig||0, idxStr: it.idx ? it.idx.join('.') : null, idxParts: it.idx ? it.idx.slice() : null, author: it.author });
         });
       });
     });
@@ -627,7 +629,22 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
   // Ordena e grava
   Object.keys(agg).forEach(function(proj){
     Object.keys(agg[proj]).forEach(function(cap){
-      agg[proj][cap].items.sort(function(a,b){ if(a.ord!==b.ord) return a.ord-b.ord; if(a.level!==b.level) return a.level-b.level; return a._orig-b._orig; });
+      agg[proj][cap].items.sort(function(a,b){
+        var aHasIdx = Array.isArray(a.idxParts) && a.idxParts.length;
+        var bHasIdx = Array.isArray(b.idxParts) && b.idxParts.length;
+        if (aHasIdx && bHasIdx){
+          var len = Math.max(a.idxParts.length, b.idxParts.length);
+          for (var i=0;i<len;i++){
+            var av=a.idxParts[i]||0, bv=b.idxParts[i]||0;
+            if (av!==bv) return av-bv;
+          }
+        } else if (aHasIdx !== bHasIdx){
+          return aHasIdx ? -1 : 1;
+        }
+        if(a.ord!==b.ord) return a.ord-b.ord;
+        if(a.level!==b.level) return a.level-b.level;
+        return a._orig-b._orig;
+      });
       agg[proj][cap].items = agg[proj][cap].items.map(function(it){ return { text: renderTextWithObs_(it), level: it.level }; });
     });
   });
