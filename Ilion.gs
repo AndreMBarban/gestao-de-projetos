@@ -308,8 +308,16 @@ function isResponsibleCoverTitle_(txt){
   return false;
 }
 
+/***** Nome do responsável (derivado do nome do arquivo) *****/
+function parseResponsibleNameFromDocName_(name){
+  var n=normalizeTxt_(name||'');
+  var m=n.match(/^tarefas\s*[–-]\s*(.+?)\s*[–-]\s*semana/i);
+  return m ? collapseSpaces_(m[1]) : collapseSpaces_(n.replace(/^tarefas\s*[–-]\s*/i,''));
+}
+
 /***** PARSE RESPONSÁVEL – guarda idxPath (ex.: [7,1,1]) *****/
-function parseResponsibleDoc_(doc){
+function parseResponsibleDoc_(doc, opts){
+  var author = opts && opts.author;
   var out={}, body=doc.getBody(), proj=null, cap=null, globalIdx=0;
   function extractIndex_(t){
     var m=(t||'').match(INDEX_PREFIX_RE);
@@ -322,7 +330,7 @@ function parseResponsibleDoc_(doc){
     if (!proj || !cap) return;
     var ext = extractIndex_(t);
     out[proj]=out[proj]||{}; out[proj][cap]=out[proj][cap]||[];
-    out[proj][cap].push({ text: ext.clean, level: lvl||0, _orig: globalIdx++, idx: ext.path });
+    out[proj][cap].push({ text: ext.clean, level: lvl||0, _orig: globalIdx++, idx: ext.path, author: author });
   }
   for (var i=0;i<body.getNumChildren();i++){
     var el=body.getChild(i);
@@ -473,6 +481,59 @@ function fuzzyParentKey_(baseInfo, chapter, level, parentText){
 function consolidateFromPeopleToProjects(stampYYMMDDOpt){
   var agg={}, respFiles=listDocsInFolder_(RESP_FOLDER_ID), orderCache={}, parentNewCounters={}, topNewCounters={};
 
+  function mergeIntoBucket_(bucket, dedupKey, incoming){
+    if (!bucket.map) bucket.map={};
+    var existing=bucket.map[dedupKey];
+    if (!existing){
+      incoming.authors = incoming.author ? [incoming.author] : [];
+      incoming.obs = [];
+      incoming.idxStr = incoming.idxStr || null;
+      bucket.map[dedupKey]=incoming;
+      bucket.items.push(incoming);
+      return;
+    }
+
+    existing.ord = Math.min(existing.ord, incoming.ord);
+    existing._orig = Math.min(existing._orig, incoming._orig);
+
+    if (!existing.idxStr && incoming.idxStr) existing.idxStr = incoming.idxStr;
+
+    existing.authors = existing.authors || [];
+    if (incoming.author && existing.authors.every(a=>a.toLowerCase()!==incoming.author.toLowerCase())){
+      existing.authors.push(incoming.author);
+    }
+
+    if (incoming.author){
+      existing.obs = existing.obs || [];
+      var noteExists = existing.obs.some(o=>o.author===incoming.author && o.text===incoming.text);
+      var shouldAddNote = (!noteExists && incoming.text);
+      if (shouldAddNote){ existing.obs.push({ author: incoming.author, text: incoming.text }); }
+    }
+  }
+
+  function renderTextWithObs_(item){
+    if (!item) return '';
+
+    var allAuthors = (item.authors||[]).map(a=>String(a||''));
+    var notes = (item.obs||[]).slice();
+
+    // garante que todo autor apareça pelo menos uma vez (mesmo sem divergência de texto)
+    allAuthors.forEach(function(a){
+      var hasNote = notes.some(n=>String(n.author||'').toLowerCase()===a.toLowerCase());
+      if (!hasNote) notes.push({ author: a, text: null });
+    });
+
+    if (!notes.length) return item.text;
+
+    var obsTxt = notes.map(function(o){
+      var author=collapseSpaces_(o.author||'Autor');
+      var extra=(o.text && o.text!==item.text) ? (': '+o.text) : '';
+      return 'Obs — '+author+extra;
+    }).join('; ');
+
+    return item.text + ' (' + obsTxt + ')';
+  }
+
   function nextAfterParentSubtree_(baseInfo, cap, parentIdxStr){
     // coloca novo filho após o último seq do pai
     var io = (baseInfo.indexOrder[cap]||{})[parentIdxStr];
@@ -491,7 +552,8 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
 
   respFiles.forEach(function(f){
     var doc=DocumentApp.openById(f.getId());
-    var mapa=parseResponsibleDoc_(doc);
+    var respName=parseResponsibleNameFromDocName_(f.getName());
+    var mapa=parseResponsibleDoc_(doc, { author: respName });
 
     Object.keys(mapa).forEach(function(proj){
       var P=normalizeTxt_(proj); if(!agg[P]) agg[P]={};
@@ -499,7 +561,7 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
       var baseInfo=orderCache[P];
 
       Object.keys(mapa[proj]).forEach(function(cap){
-        var C=normalizeTxt_(cap); if(!agg[P][C]) agg[P][C]={ items:[], seen:new Set() };
+        var C=normalizeTxt_(cap); if(!agg[P][C]) agg[P][C]={ items:[], seen:new Set(), map:{} };
 
         var stack=[];
         var stackClean=[];
@@ -555,8 +617,8 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
             }
           }
 
-          var seenKey = stackClean.slice(0, it.level+1).join(' > ') + ' @L' + it.level;
-          pushUnique_(agg[P][C].items, { text: stackClean[it.level], level: it.level, ord: ord, _orig: it._orig||0 }, agg[P][C].seen, seenKey);
+          var dedupKey = (it.idx && it.idx.length) ? ('IDX:'+it.idx.join('.')+'@L'+it.level) : (stackClean.slice(0, it.level+1).join(' > ') + ' @L' + it.level);
+          mergeIntoBucket_(agg[P][C], dedupKey, { text: stackClean[it.level], level: it.level, ord: ord, _orig: it._orig||0, idxStr: it.idx ? it.idx.join('.') : null, author: it.author });
         });
       });
     });
@@ -566,6 +628,7 @@ function consolidateFromPeopleToProjects(stampYYMMDDOpt){
   Object.keys(agg).forEach(function(proj){
     Object.keys(agg[proj]).forEach(function(cap){
       agg[proj][cap].items.sort(function(a,b){ if(a.ord!==b.ord) return a.ord-b.ord; if(a.level!==b.level) return a.level-b.level; return a._orig-b._orig; });
+      agg[proj][cap].items = agg[proj][cap].items.map(function(it){ return { text: renderTextWithObs_(it), level: it.level }; });
     });
   });
 
